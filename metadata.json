@@ -1,0 +1,6 @@
+{
+  "name": "SG HazeWatch",
+  "description": "Singapore-based atmospheric haze and live PSI monitoring dashboard tracking regional air quality, PM2.5 levels, wind vectors, and NEA health advisories.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
