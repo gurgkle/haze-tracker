@@ -88,23 +88,49 @@ export interface NeaRegionRecord {
   national?: number;
 }
 
-export interface NeaApiPayload {
-  items: Array<{
-    timestamp: string;
-    update_timestamp?: string;
-    readings: {
-      psi_twenty_four_hourly: NeaRegionRecord;
-      pm25_twenty_four_hourly?: NeaRegionRecord;
-      pm25_sub_index?: NeaRegionRecord;
-      pm10_twenty_four_hourly?: NeaRegionRecord;
-      pm10_sub_index?: NeaRegionRecord;
-      o3_eight_hour_max?: NeaRegionRecord;
-      o3_sub_index?: NeaRegionRecord;
-      co_eight_hour_max?: NeaRegionRecord;
-      co_sub_index?: NeaRegionRecord;
-      so2_twenty_four_hourly?: NeaRegionRecord;
-      so2_sub_index?: NeaRegionRecord;
-      no2_one_hour_max?: NeaRegionRecord;
-    };
-  }>;
+export interface NeaReadingItem {
+  timestamp: string;
+  update_timestamp?: string;
+  updateTimestamp?: string;
+  updatedTimestamp?: string;
+  readings: {
+    psi_twenty_four_hourly: NeaRegionRecord;
+    psi_three_hourly?: NeaRegionRecord;
+    pm25_twenty_four_hourly?: NeaRegionRecord;
+    pm25_sub_index?: NeaRegionRecord;
+    pm10_twenty_four_hourly?: NeaRegionRecord;
+    pm10_sub_index?: NeaRegionRecord;
+    o3_eight_hour_max?: NeaRegionRecord;
+    o3_sub_index?: NeaRegionRecord;
+    co_eight_hour_max?: NeaRegionRecord;
+    co_sub_index?: NeaRegionRecord;
+    so2_twenty_four_hourly?: NeaRegionRecord;
+    so2_sub_index?: NeaRegionRecord;
+    no2_one_hour_max?: NeaRegionRecord;
+    no2_sub_index?: NeaRegionRecord;
+  };
 }
+
+export interface NeaApiPayload {
+  items?: NeaReadingItem[];
+  code?: number;
+  errorMsg?: string;
+  data?: {
+    regionMetadata?: Array<{
+      name: string;
+      labelLocation: { latitude: number; longitude: number };
+    }>;
+    items: NeaReadingItem[];
+  };
+}
+
+export interface ApiHealthResponse {
+  ok: boolean;
+  status: string;
+  service: string;
+  endpoint: string;
+  upstreamStatus: 'not_checked' | 'reachable' | 'degraded';
+  latencyMs: number | null;
+  timestamp: string;
+}
+

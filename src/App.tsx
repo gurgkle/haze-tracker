@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Moon, Sun } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Moon, RefreshCw, Sun } from 'lucide-react';
 import { ApiAdapterDrawer } from './components/ApiAdapterDrawer';
 import { HealthAdvisorySection } from './components/HealthAdvisorySection';
 import { RegionalMatrixTable } from './components/RegionalMatrixTable';
@@ -7,7 +7,11 @@ import { RegionInspector } from './components/RegionInspector';
 import { type MapMetricLayer, SingaporeMap } from './components/SingaporeMap';
 import { TopBar } from './components/TopBar';
 import { TrendChart24h } from './components/TrendChart24h';
-import { getSnapshotForScenario, SCENARIOS } from './services/psiService';
+import {
+  fetchLivePsiSnapshot,
+  getSnapshotForScenario,
+  SCENARIOS,
+} from './services/psiService';
 import type {
   PsiSnapshot,
   RegionId,
@@ -26,8 +30,13 @@ const REGION_STRIP_ORDER: RegionOrNational[] = [
 ];
 
 export default function App() {
+  const [dataMode, setDataMode] = useState<'live' | 'scenario' | 'custom'>('live');
   const [scenarioId, setScenarioId] = useState<ScenarioId>('moderate');
+  const [liveSnapshot, setLiveSnapshot] = useState<PsiSnapshot | null>(null);
   const [customSnapshot, setCustomSnapshot] = useState<PsiSnapshot | null>(null);
+  const [isLoadingLive, setIsLoadingLive] = useState<boolean>(true);
+  const [liveError, setLiveError] = useState<string | null>(null);
+
   const [selectedRegion, setSelectedRegion] =
     useState<RegionOrNational>('national');
   const [metricLayer, setMetricLayer] = useState<MapMetricLayer>('psi24h');
@@ -44,14 +53,38 @@ export default function App() {
     }
   }, [isDark]);
 
+  const loadLivePsi = useCallback(async () => {
+    setIsLoadingLive(true);
+    setLiveError(null);
+    try {
+      const next = await fetchLivePsiSnapshot();
+      setLiveSnapshot(next);
+      setDataMode('live');
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Unable to fetch live PSI readings from /api/psi.';
+      setLiveError(message);
+    } finally {
+      setIsLoadingLive(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadLivePsi();
+  }, [loadLivePsi]);
+
   const snapshot = useMemo(() => {
-    if (customSnapshot) return customSnapshot;
+    if (dataMode === 'custom' && customSnapshot) return customSnapshot;
+    if (dataMode === 'live' && liveSnapshot) return liveSnapshot;
     return getSnapshotForScenario(scenarioId);
-  }, [customSnapshot, scenarioId]);
+  }, [dataMode, customSnapshot, liveSnapshot, scenarioId]);
 
   const handleSelectScenario = (id: ScenarioId) => {
     setCustomSnapshot(null);
     setScenarioId(id);
+    setDataMode('scenario');
   };
 
   return (
@@ -74,21 +107,38 @@ export default function App() {
                 {snapshot.updatedLabel}
               </span>
               <span aria-hidden="true">·</span>
-              <span>{snapshot.sourceLabel}</span>
+              <span>
+                {isLoadingLive && !liveSnapshot
+                  ? 'Connecting to /api/psi...'
+                  : snapshot.sourceLabel}
+              </span>
               <span aria-hidden="true">·</span>
               <span>NEA 24-Hr PSI & 1-Hr PM2.5 (µg/m³)</span>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
-            {/* Scenario Preview Switcher */}
+            {/* Data Source & Scenario Switcher */}
             <div
               role="group"
-              aria-label="Preview haze scenario"
+              aria-label="Data source and scenario selector"
               className="flex flex-wrap items-center rounded-md border border-slate-200 bg-white p-0.5 dark:border-slate-800 dark:bg-[#101624]"
             >
+              <button
+                type="button"
+                onClick={() => void loadLivePsi()}
+                title="Fetch live Singapore PSI from Data.gov.sg via /api/psi"
+                className={`whitespace-nowrap shrink-0 rounded px-3 py-1.5 text-xs font-medium transition-colors duration-150 ${
+                  dataMode === 'live'
+                    ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white'
+                }`}
+              >
+                Live API
+              </button>
+
               {SCENARIOS.map((sc) => {
-                const active = !customSnapshot && scenarioId === sc.id;
+                const active = dataMode === 'scenario' && scenarioId === sc.id;
                 return (
                   <button
                     key={sc.id}
@@ -106,6 +156,20 @@ export default function App() {
                 );
               })}
             </div>
+
+            <button
+              type="button"
+              onClick={() => void loadLivePsi()}
+              disabled={isLoadingLive}
+              aria-label="Refresh live PSI data"
+              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition-colors duration-150 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-800 dark:bg-[#101624] dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${isLoadingLive ? 'animate-spin' : ''}`}
+                aria-hidden="true"
+              />
+              {isLoadingLive ? 'Syncing' : 'Refresh'}
+            </button>
 
             <button
               type="button"
@@ -129,6 +193,26 @@ export default function App() {
             </button>
           </div>
         </section>
+
+        {/* Non-blocking live feed error notice */}
+        {liveError && dataMode === 'live' && (
+          <div
+            role="status"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-900 dark:border-amber-800/70 dark:bg-amber-950/30 dark:text-amber-200"
+          >
+            <div>
+              <span className="font-semibold">Live API fallback active:</span>{' '}
+              {liveError} Showing local preview values until connection succeeds.
+            </div>
+            <button
+              type="button"
+              onClick={() => void loadLivePsi()}
+              className="whitespace-nowrap shrink-0 rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 transition-colors hover:bg-amber-50 dark:border-amber-700 dark:bg-amber-900/50 dark:text-amber-100"
+            >
+              Retry Live Fetch
+            </button>
+          </div>
+        )}
 
         {/* Full-Width 6-Sector Quick Selector Strip */}
         <section
@@ -201,7 +285,7 @@ export default function App() {
 
         {/* Primary Focal Split Console: Map + Region Inspector */}
         <div className="grid grid-cols-1 items-stretch gap-6 lg:grid-cols-12">
-          <div className="lg:col-span-8 flex flex-col">
+          <div className="flex flex-col lg:col-span-8">
             <SingaporeMap
               regions={snapshot.regions}
               selectedRegion={selectedRegion}
@@ -213,7 +297,7 @@ export default function App() {
             />
           </div>
 
-          <div className="lg:col-span-4 flex flex-col">
+          <div className="flex flex-col lg:col-span-4">
             <RegionInspector
               snapshot={snapshot}
               selectedRegion={selectedRegion}
@@ -245,8 +329,8 @@ export default function App() {
       <footer className="mt-8 border-t border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0B0F19]">
         <div className="mx-auto flex max-w-[1380px] flex-wrap items-center justify-between gap-4 px-4 py-5 text-xs text-slate-500 sm:px-6 lg:px-8 dark:text-slate-400">
           <div>
-            SG HazeWatch · Singapore Regional PSI & Haze Frontend · Ready for NEA
-            Data.gov.sg API Connection
+            SG HazeWatch · Singapore Regional PSI & Haze Monitor · Data.gov.sg v2
+            Serverless Proxy
           </div>
           <div className="flex items-center gap-4">
             <button
@@ -254,7 +338,7 @@ export default function App() {
               onClick={() => setApiDrawerOpen(true)}
               className="font-medium text-slate-700 hover:text-slate-950 hover:underline underline-offset-4 dark:text-slate-300 dark:hover:text-white"
             >
-              Inspect API Schema
+              API Diagnostics
             </button>
             <a
               href="#overview"
@@ -269,9 +353,17 @@ export default function App() {
       <ApiAdapterDrawer
         open={apiDrawerOpen}
         onClose={() => setApiDrawerOpen(false)}
-        isCustomPayloadActive={Boolean(customSnapshot)}
-        onApplyCustomSnapshot={(snap) => setCustomSnapshot(snap)}
-        onResetToScenarios={() => setCustomSnapshot(null)}
+        isLiveMode={dataMode === 'live'}
+        isCustomPayloadActive={dataMode === 'custom'}
+        onFetchLive={loadLivePsi}
+        onApplyCustomSnapshot={(snap) => {
+          setCustomSnapshot(snap);
+          setDataMode('custom');
+        }}
+        onResetToScenarios={() => {
+          setCustomSnapshot(null);
+          setDataMode('scenario');
+        }}
       />
     </div>
   );

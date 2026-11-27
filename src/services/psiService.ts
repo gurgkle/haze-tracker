@@ -356,18 +356,43 @@ export function getSnapshotForScenario(scenarioId: ScenarioId): PsiSnapshot {
 }
 
 /**
- * Adapter function ready for connecting to Singapore's NEA / Data.gov.sg PSI API:
- * e.g. GET https://api.data.gov.sg/v1/environment/psi
+ * Adapter function for Singapore's Data.gov.sg v2 & v1 PSI endpoints:
+ * e.g. GET /api/psi -> https://api-open.data.gov.sg/v2/real-time/api/psi
  */
-export function parseNeaApiPayload(payload: NeaApiPayload): PsiSnapshot {
-  if (!payload?.items?.length) {
-    throw new Error('Invalid NEA payload: missing items array.');
+export function parseNeaApiPayload(
+  payload: NeaApiPayload,
+  sourceLabel = 'Live · Data.gov.sg v2 API'
+): PsiSnapshot {
+  const rawItems = payload?.data?.items ?? payload?.items;
+  if (!rawItems?.length) {
+    throw new Error('Invalid Data.gov.sg PSI payload: missing items array.');
   }
 
-  const latest = payload.items[0];
+  // Sort items chronologically so latest is at the end, and extract latest item
+  const sortedItems = [...rawItems].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+  const latest = sortedItems[sortedItems.length - 1];
   const r = latest.readings;
   if (!r?.psi_twenty_four_hourly) {
-    throw new Error('Invalid NEA payload: missing psi_twenty_four_hourly.');
+    throw new Error(
+      'Invalid Data.gov.sg PSI payload: missing psi_twenty_four_hourly.'
+    );
+  }
+
+  // Find a reading ~3 hours earlier if historical items are included
+  const latestMs = new Date(latest.timestamp).getTime();
+  const threeHoursAgoTarget = latestMs - 3 * 3600 * 1000;
+  let ref3h = sortedItems.length > 1 ? sortedItems[0] : null;
+  if (sortedItems.length > 1) {
+    let bestDiff = Infinity;
+    for (const item of sortedItems) {
+      const diff = Math.abs(new Date(item.timestamp).getTime() - threeHoursAgoTarget);
+      if (diff < bestDiff && item !== latest) {
+        bestDiff = diff;
+        ref3h = item;
+      }
+    }
   }
 
   const regionIds: RegionId[] = ['west', 'north', 'central', 'east', 'south'];
@@ -379,13 +404,17 @@ export function parseNeaApiPayload(payload: NeaApiPayload): PsiSnapshot {
   regionIds.forEach((id) => {
     const meta = REGION_DIRECTORY[id];
     const psiVal = Number(r.psi_twenty_four_hourly[id] ?? 0);
-    const pm25_24h = Number(r.pm25_twenty_four_hourly?.[id] ?? Math.round(psiVal * 0.45));
+    const pm25_24h = Number(
+      r.pm25_twenty_four_hourly?.[id] ?? Math.round(psiVal * 0.45)
+    );
     const pm25_1h = Math.round(pm25_24h * 1.12);
     const reading: PollutantReadings = {
       psi24h: psiVal,
       pm25_24h,
       pm25_1h,
-      pm10_24h: Number(r.pm10_twenty_four_hourly?.[id] ?? Math.round(pm25_24h * 1.45)),
+      pm10_24h: Number(
+        r.pm10_twenty_four_hourly?.[id] ?? Math.round(pm25_24h * 1.45)
+      ),
       o3_8h_max: Number(r.o3_eight_hour_max?.[id] ?? 42),
       co_8h_max: Number(r.co_eight_hour_max?.[id] ?? 0.5),
       so2_24h: Number(r.so2_twenty_four_hourly?.[id] ?? 12),
@@ -396,9 +425,16 @@ export function parseNeaApiPayload(payload: NeaApiPayload): PsiSnapshot {
         o3: Number(r.o3_sub_index?.[id] ?? 24),
         co: Number(r.co_sub_index?.[id] ?? 8),
         so2: Number(r.so2_sub_index?.[id] ?? 10),
-        no2: Math.round(Number(r.no2_one_hour_max?.[id] ?? 26) * 0.5),
+        no2: Number(
+          r.no2_sub_index?.[id] ??
+            Math.round(Number(r.no2_one_hour_max?.[id] ?? 26) * 0.5)
+        ),
       },
     };
+
+    const prev3hVal = ref3h?.readings?.psi_twenty_four_hourly?.[id];
+    const delta3h =
+      typeof prev3hVal === 'number' ? Math.round(psiVal - prev3hVal) : 0;
 
     psiMap[id] = psiVal;
     pm25Map[id] = pm25_1h;
@@ -411,37 +447,263 @@ export function parseNeaApiPayload(payload: NeaApiPayload): PsiSnapshot {
       lat: meta.lat,
       lng: meta.lng,
       reading,
-      wind: SCENARIO_SEEDS.moderate.wind[id],
-      delta3h: 0,
+      wind: SCENARIO_SEEDS.baseline.wind[id],
+      delta3h,
       dominantPollutant: findDominantPollutant(reading),
     };
   });
 
   const nationalPsi =
     r.psi_twenty_four_hourly.national ??
-    Math.round(regionIds.reduce((acc, id) => acc + psiMap[id], 0) / regionIds.length);
-  const nationalPm25 = Math.round(
-    regionIds.reduce((acc, id) => acc + pm25Map[id], 0) / regionIds.length
-  );
-  psiMap.national = nationalPsi;
-  pm25Map.national = nationalPm25;
+    Math.round(
+      regionIds.reduce((acc, id) => acc + psiMap[id], 0) / regionIds.length
+    );
+  const nationalPm25_24h =
+    r.pm25_twenty_four_hourly?.national ??
+    Math.round(
+      regionIds.reduce((acc, id) => acc + regions[id].reading.pm25_24h, 0) /
+        regionIds.length
+    );
+  const nationalPm25_1h = Math.round(nationalPm25_24h * 1.12);
 
-  const nationalReading = buildReadings(nationalPsi, nationalPm25, nationalPsi / 80);
-  const timestampIso = latest.update_timestamp || latest.timestamp || new Date().toISOString();
+  psiMap.national = nationalPsi;
+  pm25Map.national = nationalPm25_1h;
+
+  const nationalReading: PollutantReadings = {
+    psi24h: nationalPsi,
+    pm25_24h: nationalPm25_24h,
+    pm25_1h: nationalPm25_1h,
+    pm10_24h:
+      r.pm10_twenty_four_hourly?.national ??
+      Math.round(
+        regionIds.reduce((acc, id) => acc + regions[id].reading.pm10_24h, 0) /
+          regionIds.length
+      ),
+    o3_8h_max:
+      r.o3_eight_hour_max?.national ??
+      Math.round(
+        regionIds.reduce((acc, id) => acc + regions[id].reading.o3_8h_max, 0) /
+          regionIds.length
+      ),
+    co_8h_max:
+      r.co_eight_hour_max?.national ??
+      Number(
+        (
+          regionIds.reduce(
+            (acc, id) => acc + regions[id].reading.co_8h_max,
+            0
+          ) / regionIds.length
+        ).toFixed(2)
+      ),
+    so2_24h:
+      r.so2_twenty_four_hourly?.national ??
+      Math.round(
+        regionIds.reduce((acc, id) => acc + regions[id].reading.so2_24h, 0) /
+          regionIds.length
+      ),
+    no2_1h_max:
+      r.no2_one_hour_max?.national ??
+      Math.round(
+        regionIds.reduce((acc, id) => acc + regions[id].reading.no2_1h_max, 0) /
+          regionIds.length
+      ),
+    subIndices: {
+      pm25: r.pm25_sub_index?.national ?? nationalPsi,
+      pm10:
+        r.pm10_sub_index?.national ??
+        Math.round(
+          regionIds.reduce(
+            (acc, id) => acc + regions[id].reading.subIndices.pm10,
+            0
+          ) / regionIds.length
+        ),
+      o3:
+        r.o3_sub_index?.national ??
+        Math.round(
+          regionIds.reduce(
+            (acc, id) => acc + regions[id].reading.subIndices.o3,
+            0
+          ) / regionIds.length
+        ),
+      co:
+        r.co_sub_index?.national ??
+        Math.round(
+          regionIds.reduce(
+            (acc, id) => acc + regions[id].reading.subIndices.co,
+            0
+          ) / regionIds.length
+        ),
+      so2:
+        r.so2_sub_index?.national ??
+        Math.round(
+          regionIds.reduce(
+            (acc, id) => acc + regions[id].reading.subIndices.so2,
+            0
+          ) / regionIds.length
+        ),
+      no2:
+        r.no2_sub_index?.national ??
+        Math.round(
+          regionIds.reduce(
+            (acc, id) => acc + regions[id].reading.subIndices.no2,
+            0
+          ) / regionIds.length
+        ),
+    },
+  };
+
+  const prevNational3h = ref3h?.readings?.psi_twenty_four_hourly?.national;
+  const nationalDelta =
+    typeof prevNational3h === 'number'
+      ? Math.round(nationalPsi - prevNational3h)
+      : Math.round(
+          regionIds.reduce((acc, id) => acc + regions[id].delta3h, 0) /
+            regionIds.length
+        );
+
+  const timestampIso =
+    latest.updatedTimestamp ||
+    latest.updateTimestamp ||
+    latest.update_timestamp ||
+    latest.timestamp ||
+    new Date().toISOString();
+
+  // Build hourly trend from actual returned items if >= 2, else generate contextual trajectory
+  let hourly24h: HourlyPoint[];
+  if (sortedItems.length >= 2) {
+    hourly24h = sortedItems.slice(-24).map((item) => {
+      const dt = new Date(item.timestamp);
+      const hourLabel = new Intl.DateTimeFormat('en-SG', {
+        timeZone: 'Asia/Singapore',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(dt);
+
+      const itemRegions = {} as Record<
+        RegionOrNational,
+        { psi24h: number; pm25_1h: number }
+      >;
+      const ir = item.readings;
+      regionIds.forEach((id) => {
+        const psi = Number(ir.psi_twenty_four_hourly?.[id] ?? psiMap[id]);
+        const pm25 = Math.round(
+          Number(ir.pm25_twenty_four_hourly?.[id] ?? Math.round(psi * 0.45)) *
+            1.12
+        );
+        itemRegions[id] = { psi24h: psi, pm25_1h: pm25 };
+      });
+      const natPsi =
+        ir.psi_twenty_four_hourly?.national ??
+        Math.round(
+          regionIds.reduce((acc, id) => acc + itemRegions[id].psi24h, 0) /
+            regionIds.length
+        );
+      const natPm =
+        ir.pm25_twenty_four_hourly?.national !== undefined
+          ? Math.round(Number(ir.pm25_twenty_four_hourly.national) * 1.12)
+          : Math.round(
+              regionIds.reduce((acc, id) => acc + itemRegions[id].pm25_1h, 0) /
+                regionIds.length
+            );
+      itemRegions.national = { psi24h: natPsi, pm25_1h: natPm };
+
+      return {
+        hourLabel,
+        timestampIso: item.timestamp,
+        regions: itemRegions,
+      };
+    });
+  } else {
+    hourly24h = generateHourlySeries(psiMap, pm25Map, 3, 2);
+  }
 
   return {
     timestampIso,
     updatedLabel: formatSgtTimestamp(timestampIso),
-    sourceLabel: 'Custom JSON Payload · NEA Adapter',
+    sourceLabel,
     isLiveApi: true,
-    scenarioId: 'moderate',
+    scenarioId: 'baseline',
     national: {
       ...nationalReading,
-      delta3h: 0,
+      delta3h: nationalDelta,
       dominantPollutant: findDominantPollutant(nationalReading),
-      wind: SCENARIO_SEEDS.moderate.wind.central,
+      wind: SCENARIO_SEEDS.baseline.wind.central,
     },
     regions,
-    hourly24h: generateHourlySeries(psiMap, pm25Map, 5, 10),
+    hourly24h,
   };
 }
+
+function getSgtDateString(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Singapore',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const year = parts.find((p) => p.type === 'year')?.value ?? '2026';
+  const month = parts.find((p) => p.type === 'month')?.value ?? '01';
+  const day = parts.find((p) => p.type === 'day')?.value ?? '01';
+  return `${year}-${month}-${day}`;
+}
+
+export async function fetchLivePsiSnapshot(): Promise<PsiSnapshot> {
+  const sgtDate = getSgtDateString();
+
+  // Fetch latest reading and today's hourly series in parallel via our serverless /api/psi route
+  const [latestRes, dailyRes] = await Promise.allSettled([
+    fetch('/api/psi', { headers: { Accept: 'application/json' } }),
+    fetch(`/api/psi?date=${encodeURIComponent(sgtDate)}`, {
+      headers: { Accept: 'application/json' },
+    }),
+  ]);
+
+  if (latestRes.status !== 'fulfilled' || !latestRes.value.ok) {
+    let message = 'Unable to load live PSI data from /api/psi.';
+    if (latestRes.status === 'fulfilled') {
+      try {
+        const errBody = (await latestRes.value.json()) as { error?: string };
+        if (errBody?.error) message = errBody.error;
+      } catch {
+        // Ignore parse error
+      }
+    }
+    throw new Error(message);
+  }
+
+  const latestPayload = (await latestRes.value.json()) as NeaApiPayload;
+
+  // Merge today's hourly items if the daily query returned richer history
+  if (dailyRes.status === 'fulfilled' && dailyRes.value.ok) {
+    try {
+      const dailyPayload = (await dailyRes.value.json()) as NeaApiPayload;
+      const dailyItems = dailyPayload?.data?.items ?? [];
+      const latestItems = latestPayload?.data?.items ?? [];
+      if (dailyItems.length > latestItems.length) {
+        const seen = new Set(dailyItems.map((i) => i.timestamp));
+        const merged = [
+          ...dailyItems,
+          ...latestItems.filter((i) => !seen.has(i.timestamp)),
+        ];
+        if (latestPayload.data) {
+          latestPayload.data.items = merged;
+        }
+      }
+    } catch {
+      // Fall back gracefully to latestPayload alone
+    }
+  }
+
+  return parseNeaApiPayload(latestPayload, 'Live · Data.gov.sg v2 API');
+}
+
+export async function fetchApiHealth(checkUpstream = true) {
+  const url = checkUpstream ? '/api/health?check=upstream' : '/api/health';
+  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  if (!res.ok) {
+    throw new Error(`Health check failed with HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
